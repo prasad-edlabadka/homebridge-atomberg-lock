@@ -1,0 +1,83 @@
+{
+  "pluginAlias": "AtombergLock",
+  "pluginType": "accessory",
+  "singular": false,
+  "headerDisplay": "Homebridge plugin for Atomberg SL1 Pro Bluetooth Smart Lock (Homebridge 2.0 & 1.x ready)",
+  "footerDisplay": "For troubleshooting and credentials extraction, see project README.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Accessory Name",
+        "type": "string",
+        "default": "Front Door Lock",
+        "required": true
+      },
+      "mac": {
+        "title": "Lock MAC Address",
+        "type": "string",
+        "placeholder": "AA:BB:CC:11:22:33",
+        "description": "Bluetooth MAC address of the Atomberg Lock."
+      },
+      "masterKey": {
+        "title": "Static Master Key",
+        "type": "string",
+        "placeholder": "AbCdEfGhIjKlMnOp",
+        "description": "16-character ASCII key extracted from pairing log."
+      },
+      "salt": {
+        "title": "Lock Salt",
+        "type": "string",
+        "placeholder": "1a2b3c4d",
+        "description": "8-character hex salt extracted from pairing log."
+      },
+      "configPath": {
+        "title": "Or Path to config.json (Alternative)",
+        "type": "string",
+        "placeholder": "/home/homebridge/config.json",
+        "description": "Optional: Path to JSON configuration file if you prefer not to enter keys directly above."
+      },
+      "adapter": {
+        "title": "Bluetooth Adapter (Optional)",
+        "type": "string",
+        "default": "hci0",
+        "description": "HCI adapter name (e.g. hci0 or hci1)."
+      },
+      "autoLockDelay": {
+        "title": "Auto-Relock Delay (Seconds)",
+        "type": "integer",
+        "default": 5,
+        "minimum": 1,
+        "maximum": 60,
+        "description": "Seconds after unlock before HomeKit automatically displays the lock as SECURED (matching hardware 5s clutch)."
+      },
+      "pythonPath": {
+        "title": "Python 3 Executable Path (Optional)",
+        "type": "string",
+        "placeholder": "/home/homebridge/venv/bin/python3",
+        "description": "Leave blank to auto-detect (/home/homebridge/venv/bin/python3 or system python3)."
+      },
+      "enableBattery": {
+        "title": "Expose Battery Service",
+        "type": "boolean",
+        "default": true,
+        "description": "Periodically queries and reports lock battery percentage in Apple Home."
+      }
+    }
+  },
+  "form": [
+    "name",
+    "mac",
+    "masterKey",
+    "salt",
+    "autoLockDelay",
+    "enableBattery",
+    {
+      "type": "help",
+      "helpvalue": "<h5>Advanced Settings</h5>"
+    },
+    "configPath",
+    "adapter",
+    "pythonPath"
+  ]
+}
