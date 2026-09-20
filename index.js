@@ -44,26 +44,24 @@ class AtombergLockAccessory {
     this.currentState = this.Characteristic.LockCurrentState.SECURED;
     this.targetState = this.Characteristic.LockTargetState.SECURED;
     this.isUnlocking = false;
-    this.autoLockTimeout = null;
 
     // Battery State
     this.batteryLevel = 100;
     this.statusLowBattery = this.Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL;
 
-    this.log.info(`[${this.name}] Initialized using script: ${this.scriptPath}`);
-    this.log.info(`[${this.name}] Using Python interpreter: ${this.pythonPath}`);
+    this.log.info(`[${this.name}] Initializing with script: ${this.scriptPath}`);
+    this.log.info(`[${this.name}] Using Python path: ${this.pythonPath}`);
 
     // 1. Accessory Information Service
     this.infoService = new this.Service.AccessoryInformation()
       .setCharacteristic(this.Characteristic.Manufacturer, 'Atomberg')
       .setCharacteristic(this.Characteristic.Model, 'SL1 Pro')
       .setCharacteristic(this.Characteristic.SerialNumber, this.mac || 'SL1-PRO')
-      .setCharacteristic(this.Characteristic.FirmwareRevision, '1.0.0');
+      .setCharacteristic(this.Characteristic.FirmwareRevision, '1.0.1');
 
     // 2. Lock Mechanism Service
     this.lockService = new this.Service.LockMechanism(this.name);
 
-    // Explicitly set initial characteristic values so HomeKit & Homebridge UI immediately have active state
     this.lockService
       .setCharacteristic(this.Characteristic.LockCurrentState, this.Characteristic.LockCurrentState.SECURED)
       .setCharacteristic(this.Characteristic.LockTargetState, this.Characteristic.LockTargetState.SECURED);
@@ -115,72 +113,64 @@ class AtombergLockAccessory {
   }
 
   async getLockCurrentState() {
-    this.log.debug(`[${this.name}] Querying LockCurrentState -> ${this.currentState === 0 ? 'UNSECURED' : 'SECURED'}`);
     return this.currentState;
   }
 
   async getLockTargetState() {
-    this.log.debug(`[${this.name}] Querying LockTargetState -> ${this.targetState === 0 ? 'UNSECURED' : 'SECURED'}`);
     return this.targetState;
   }
 
   async setLockTargetState(value) {
-    this.log.info(`[${this.name}] Received Command: Set Target State to ${value === this.Characteristic.LockTargetState.UNSECURED ? 'UNSECURED (Unlock)' : 'SECURED (Lock)'}`);
+    this.log.info(`[${this.name}] Received Command: Set Target State to ${value === 0 ? 'UNSECURED (Unlock)' : 'SECURED (Lock)'}`);
 
     if (value === this.Characteristic.LockTargetState.SECURED) {
-      // Hardware is already mechanically auto-relocked
       this.targetState = this.Characteristic.LockTargetState.SECURED;
       this.currentState = this.Characteristic.LockCurrentState.SECURED;
       this.lockService.updateCharacteristic(this.Characteristic.LockCurrentState, this.currentState);
+      this.lockService.updateCharacteristic(this.Characteristic.LockTargetState, this.targetState);
       return;
     }
 
-    // Trigger Unlock
     if (this.isUnlocking) {
-      this.log.warn(`[${this.name}] Unlock already in progress, ignoring duplicate request.`);
+      this.log.warn(`[${this.name}] Unlock already in progress, ignoring duplicate.`);
       return;
     }
 
     this.isUnlocking = true;
     this.targetState = this.Characteristic.LockTargetState.UNSECURED;
+    this.lockService.updateCharacteristic(this.Characteristic.LockTargetState, this.targetState);
 
-    // Clear any existing relock timers
-    if (this.autoLockTimeout) {
-      clearTimeout(this.autoLockTimeout);
-      this.autoLockTimeout = null;
-    }
+    // Asynchronously execute BLE unlock so HomeKit UI receives instant feedback
+    (async () => {
+      try {
+        this.log.info(`[${this.name}] Initiating BLE unlock sequence...`);
+        const stdout = await this.executeCliCommand('unlock');
+        this.log.info(`[${this.name}] Output: ${stdout.trim().replace(/\n/g, ' ')}`);
+        this.log.info(`[${this.name}] Door unlocked successfully!`);
 
-    try {
-      this.log.info(`[${this.name}] Triggering BLE unlock...`);
-      await this.executeCliCommand('unlock');
-      this.log.info(`[${this.name}] Lock successfully unlocked over BLE!`);
+        // Set state to Unlocked
+        this.currentState = this.Characteristic.LockCurrentState.UNSECURED;
+        this.lockService.updateCharacteristic(this.Characteristic.LockCurrentState, this.currentState);
 
-      // Update HomeKit to Unlocked
-      this.currentState = this.Characteristic.LockCurrentState.UNSECURED;
-      this.lockService.updateCharacteristic(this.Characteristic.LockCurrentState, this.currentState);
+        // Schedule auto-relock transition to match hardware clutch
+        setTimeout(() => {
+          this.log.info(`[${this.name}] Auto-relocking state (matching hardware 5s clutch).`);
+          this.currentState = this.Characteristic.LockCurrentState.SECURED;
+          this.targetState = this.Characteristic.LockTargetState.SECURED;
+          this.lockService.updateCharacteristic(this.Characteristic.LockCurrentState, this.currentState);
+          this.lockService.updateCharacteristic(this.Characteristic.LockTargetState, this.targetState);
+          this.isUnlocking = false;
+        }, this.autoLockDelay * 1000);
 
-      // Schedule auto-relock transition to match hardware clutch (~5s)
-      this.autoLockTimeout = setTimeout(() => {
-        this.log.info(`[${this.name}] Auto-relocking state in HomeKit (matching hardware 5s clutch).`);
+      } catch (err) {
+        this.log.error(`[${this.name}] Unlock failed: ${err.message || err}`);
         this.currentState = this.Characteristic.LockCurrentState.SECURED;
         this.targetState = this.Characteristic.LockTargetState.SECURED;
         this.lockService.updateCharacteristic(this.Characteristic.LockCurrentState, this.currentState);
         this.lockService.updateCharacteristic(this.Characteristic.LockTargetState, this.targetState);
-        this.autoLockTimeout = null;
-      }, this.autoLockDelay * 1000);
-
-    } catch (err) {
-      this.log.error(`[${this.name}] Failed to unlock: ${err.message || err}`);
-      // Revert states
-      this.targetState = this.Characteristic.LockTargetState.SECURED;
-      this.currentState = this.Characteristic.LockCurrentState.SECURED;
-      this.lockService.updateCharacteristic(this.Characteristic.LockTargetState, this.targetState);
-      this.lockService.updateCharacteristic(this.Characteristic.LockCurrentState, this.currentState);
-
-      throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.OPERATION_TIMED_OUT);
-    } finally {
-      this.isUnlocking = false;
-    }
+        this.isUnlocking = false;
+      }
+    })();
   }
 
   executeCliCommand(action) {
@@ -198,7 +188,7 @@ class AtombergLockAccessory {
         args.push('-s', this.salt);
       }
 
-      // Or fallback to config path
+      // Fallback to config path
       if (!this.mac && this.configPath) {
         args.push('-c', this.configPath);
       }
@@ -211,7 +201,7 @@ class AtombergLockAccessory {
 
       this.log.info(`[${this.name}] Executing: ${this.pythonPath} ${args.join(' ')}`);
 
-      execFile(this.pythonPath, args, { timeout: 25000 }, (error, stdout, stderr) => {
+      execFile(this.pythonPath, args, { timeout: 30000 }, (error, stdout, stderr) => {
         if (error) {
           return reject(new Error(stderr || stdout || error.message));
         }
