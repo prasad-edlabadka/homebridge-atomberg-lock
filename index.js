@@ -35,7 +35,7 @@ class AtombergLockAccessory {
     this.mac = this.config.mac || this.config.LOCK_MAC || '';
     this.masterKey = this.config.masterKey || this.config.STATIC_MASTER_KEY || '';
     this.salt = this.config.salt || this.config.LOCK_SALT || '';
-    this.configPath = this.config.configPath || '';
+    this.configPath = this.config.configPath || (fs.existsSync('/home/homebridge/config.json') ? '/home/homebridge/config.json' : '');
     this.adapter = this.config.adapter || '';
     this.autoLockDelay = this.config.autoLockDelay !== undefined ? Number(this.config.autoLockDelay) : 5;
     this.enableBattery = this.config.enableBattery !== undefined ? Boolean(this.config.enableBattery) : true;
@@ -50,18 +50,23 @@ class AtombergLockAccessory {
     this.batteryLevel = 100;
     this.statusLowBattery = this.Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL;
 
-    this.log.info(`[${this.name}] Initialized using bundled script: ${this.scriptPath}`);
+    this.log.info(`[${this.name}] Initialized using script: ${this.scriptPath}`);
     this.log.info(`[${this.name}] Using Python interpreter: ${this.pythonPath}`);
 
-    // Accessory Information Service
+    // 1. Accessory Information Service
     this.infoService = new this.Service.AccessoryInformation()
       .setCharacteristic(this.Characteristic.Manufacturer, 'Atomberg')
       .setCharacteristic(this.Characteristic.Model, 'SL1 Pro')
       .setCharacteristic(this.Characteristic.SerialNumber, this.mac || 'SL1-PRO')
       .setCharacteristic(this.Characteristic.FirmwareRevision, '1.0.0');
 
-    // Lock Mechanism Service
+    // 2. Lock Mechanism Service
     this.lockService = new this.Service.LockMechanism(this.name);
+
+    // Explicitly set initial characteristic values so HomeKit & Homebridge UI immediately have active state
+    this.lockService
+      .setCharacteristic(this.Characteristic.LockCurrentState, this.Characteristic.LockCurrentState.SECURED)
+      .setCharacteristic(this.Characteristic.LockTargetState, this.Characteristic.LockTargetState.SECURED);
 
     this.lockService
       .getCharacteristic(this.Characteristic.LockCurrentState)
@@ -72,9 +77,14 @@ class AtombergLockAccessory {
       .onGet(this.getLockTargetState.bind(this))
       .onSet(this.setLockTargetState.bind(this));
 
-    // Optional Battery Service
+    // 3. Optional Battery Service
     if (this.enableBattery) {
       this.batteryService = new this.Service.Battery(this.name + ' Battery');
+
+      this.batteryService
+        .setCharacteristic(this.Characteristic.BatteryLevel, 100)
+        .setCharacteristic(this.Characteristic.StatusLowBattery, this.Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL)
+        .setCharacteristic(this.Characteristic.ChargingState, this.Characteristic.ChargingState.NOT_CHARGEABLE);
 
       this.batteryService
         .getCharacteristic(this.Characteristic.BatteryLevel)
@@ -83,10 +93,6 @@ class AtombergLockAccessory {
       this.batteryService
         .getCharacteristic(this.Characteristic.StatusLowBattery)
         .onGet(this.getStatusLowBattery.bind(this));
-
-      this.batteryService
-        .getCharacteristic(this.Characteristic.ChargingState)
-        .setValue(this.Characteristic.ChargingState.NOT_CHARGEABLE);
 
       // Periodically update battery every 2 hours
       setInterval(() => {
@@ -109,15 +115,17 @@ class AtombergLockAccessory {
   }
 
   async getLockCurrentState() {
+    this.log.debug(`[${this.name}] Querying LockCurrentState -> ${this.currentState === 0 ? 'UNSECURED' : 'SECURED'}`);
     return this.currentState;
   }
 
   async getLockTargetState() {
+    this.log.debug(`[${this.name}] Querying LockTargetState -> ${this.targetState === 0 ? 'UNSECURED' : 'SECURED'}`);
     return this.targetState;
   }
 
   async setLockTargetState(value) {
-    this.log.info(`[${this.name}] Setting Target State to: ${value === this.Characteristic.LockTargetState.UNSECURED ? 'UNSECURED' : 'SECURED'}`);
+    this.log.info(`[${this.name}] Received Command: Set Target State to ${value === this.Characteristic.LockTargetState.UNSECURED ? 'UNSECURED (Unlock)' : 'SECURED (Lock)'}`);
 
     if (value === this.Characteristic.LockTargetState.SECURED) {
       // Hardware is already mechanically auto-relocked
@@ -143,8 +151,9 @@ class AtombergLockAccessory {
     }
 
     try {
+      this.log.info(`[${this.name}] Triggering BLE unlock...`);
       await this.executeCliCommand('unlock');
-      this.log.info(`[${this.name}] Lock successfully unlocked over BLE.`);
+      this.log.info(`[${this.name}] Lock successfully unlocked over BLE!`);
 
       // Update HomeKit to Unlocked
       this.currentState = this.Characteristic.LockCurrentState.UNSECURED;
@@ -200,7 +209,7 @@ class AtombergLockAccessory {
 
       args.push(action);
 
-      this.log.debug(`Executing: ${this.pythonPath} ${args.join(' ')}`);
+      this.log.info(`[${this.name}] Executing: ${this.pythonPath} ${args.join(' ')}`);
 
       execFile(this.pythonPath, args, { timeout: 25000 }, (error, stdout, stderr) => {
         if (error) {
@@ -241,7 +250,7 @@ class AtombergLockAccessory {
               this.batteryService.updateCharacteristic(this.Characteristic.BatteryLevel, this.batteryLevel);
               this.batteryService.updateCharacteristic(this.Characteristic.StatusLowBattery, this.statusLowBattery);
             }
-            this.log.debug(`[${this.name}] Battery updated: ${this.batteryLevel}%`);
+            this.log.info(`[${this.name}] Battery updated: ${this.batteryLevel}%`);
           }
         }
       })
