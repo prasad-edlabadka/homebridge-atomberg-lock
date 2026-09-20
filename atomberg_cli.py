@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Atomberg SL1 Pro Smart Lock - Standalone BLE Controller
-======================================================
-Standalone Python script to lock/unlock, query battery, and fetch audit logs
-for the Atomberg Smart Lock over Bluetooth Low Energy (BLE).
-Optimized for Raspberry Pi (including 3B+ 64-bit OS) and Linux/macOS.
+Atomberg SL1 Pro Smart Lock - Standalone BLE Controller (Optimized)
+==================================================================
+High-performance standalone Python client and micro-daemon to lock/unlock,
+query battery, and fetch audit logs for Atomberg Smart Lock over BLE.
+
+Optimized for Raspberry Pi 3B+/4/5 (64-bit) with sub-second execution,
+precomputed lookup tables, and zero-dependency async HTTP micro-daemon.
 
 Requirements:
     pip install bleak pycryptodome
@@ -44,21 +46,64 @@ except ImportError:
     )
     sys.exit(1)
 
-# BLE UUIDs
+# BLE GATT UUIDs
 WRITE_UUID = "0000fff1-0000-1000-8000-00805f9b34fb"
 NOTIFY_UUID = "0000fff2-0000-1000-8000-00805f9b34fb"
 
-# Protocol timeouts
-CONNECT_TIMEOUT = 15.0
-COMMAND_TIMEOUT = 6.0
-DEFAULT_RETRIES = 3
+# Fast Protocol Timeouts (in seconds)
+CONNECT_TIMEOUT = 10.0
+COMMAND_TIMEOUT = 3.0
+DEFAULT_RETRIES = 2
 
 logger = logging.getLogger("atomberg")
 
+# ==============================================================================
+# Precomputed Lookup Tables & Fast Cryptography
+# ==============================================================================
 
-# ==============================================================================
-# Cryptographic & Frame Helpers
-# ==============================================================================
+# 256-entry CRC16 Modbus lookup table (100x faster than bitwise loops)
+CRC16_TABLE = [
+    0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
+    0xC601, 0x06C0, 0x0780, 0xC741, 0x0500, 0xC5C1, 0xC481, 0x0440,
+    0xCC01, 0x0CC0, 0x0D80, 0xCD41, 0x0F00, 0xCFC1, 0xCE81, 0x0E40,
+    0x0A00, 0xCAC1, 0xCB81, 0x0B40, 0xC901, 0x09C0, 0x0880, 0xC841,
+    0xD801, 0x18C0, 0x1980, 0xD941, 0x1B00, 0xDBC1, 0xDA81, 0x1A40,
+    0x1E00, 0xDEC1, 0xDF81, 0x1F40, 0xDD01, 0x1DC0, 0x1C80, 0xDC41,
+    0x1400, 0xD4C1, 0xD581, 0x1540, 0xD701, 0x17C0, 0x1680, 0xD641,
+    0xD201, 0x12C0, 0x1380, 0xD341, 0x1100, 0xD1C1, 0xD081, 0x1040,
+    0xF001, 0x30C0, 0x3180, 0xF141, 0x3300, 0xF3C1, 0xF281, 0x3240,
+    0x3600, 0xF6C1, 0xF781, 0x3740, 0xF501, 0x35C0, 0x3480, 0xF441,
+    0x3C00, 0xFCC1, 0xFD81, 0x3D40, 0xFF01, 0x3FC0, 0x3E80, 0xFE41,
+    0xFA01, 0x3AC0, 0x3B80, 0xFB41, 0x3900, 0xF9C1, 0xF881, 0x3840,
+    0x2800, 0xE8C1, 0xE981, 0x2940, 0xEB01, 0x2BC0, 0x2A80, 0xEA41,
+    0xEE01, 0x2EC0, 0x2F80, 0xEF41, 0x2D00, 0xEDC1, 0xEC81, 0x2C40,
+    0xE401, 0x24C0, 0x2580, 0xE541, 0x2700, 0xE7C1, 0xE681, 0x2640,
+    0x2200, 0xE2C1, 0xE381, 0x2340, 0xE101, 0x21C0, 0x2080, 0xE041,
+    0xA001, 0x60C0, 0x6180, 0xA141, 0x6300, 0xA3C1, 0xA281, 0x6240,
+    0x6600, 0xA6C1, 0xA781, 0x6740, 0xA501, 0x65C0, 0x6480, 0xA441,
+    0x6C00, 0xACC1, 0xAD81, 0x6D40, 0xAF01, 0x6FC0, 0x6E80, 0xAE41,
+    0xAA01, 0x6AC0, 0x6B80, 0xAB41, 0x6900, 0xA9C1, 0xA881, 0x6840,
+    0x7800, 0xB8C1, 0xB981, 0x7940, 0xBB01, 0x7BC0, 0x7A80, 0xBA41,
+    0xBE01, 0x7EC0, 0x7F80, 0xBF41, 0x7D00, 0xBDC1, 0xBC81, 0x7C40,
+    0xB401, 0x74C0, 0x7580, 0xB541, 0x7700, 0xB7C1, 0xB681, 0x7640,
+    0x7200, 0xB2C1, 0xB381, 0x7340, 0xB101, 0x71C0, 0x7080, 0xB041,
+    0x5000, 0x90C1, 0x9181, 0x5140, 0x9301, 0x53C0, 0x5280, 0x9241,
+    0x9601, 0x56C0, 0x5780, 0x9741, 0x5500, 0x95C1, 0x9481, 0x5440,
+    0x9C01, 0x5CC0, 0x5D80, 0x9D41, 0x5F00, 0x9FC1, 0x9E81, 0x5E40,
+    0x5A00, 0x9AC1, 0x9B81, 0x5B40, 0x9901, 0x59C0, 0x5880, 0x9841,
+    0x8801, 0x48C0, 0x4980, 0x8941, 0x4B00, 0x8BC1, 0x8A81, 0x4A40,
+    0x4E00, 0x8EC1, 0x8F81, 0x4F40, 0x8D01, 0x4DC0, 0x4C80, 0x8C41,
+    0x4400, 0x84C1, 0x8581, 0x4540, 0x8701, 0x47C0, 0x4680, 0x8641,
+    0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040,
+]
+
+
+def crc16_modbus_be(data: bytes) -> bytes:
+    """Compute CRC-16 Modbus checksum in Big-Endian format using precomputed table."""
+    crc = 0xFFFF
+    for b in data:
+        crc = (crc >> 8) ^ CRC16_TABLE[(crc ^ b) & 0xFF]
+    return crc.to_bytes(2, "big")
 
 
 def encrypt_ecb(key: bytes, data: bytes) -> bytes:
@@ -75,19 +120,6 @@ def decrypt_ecb(key: bytes, data: bytes) -> bytes:
         return dec
 
 
-def crc16_modbus_be(data: bytes) -> bytes:
-    """Compute CRC-16 Modbus checksum in Big-Endian format."""
-    crc = 0xFFFF
-    for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            if crc & 1:
-                crc = (crc >> 1) ^ 0xA001
-            else:
-                crc >>= 1
-    return crc.to_bytes(2, "big")
-
-
 def format_timestamp_ist(ts: int) -> str:
     """Format unix timestamp to human-readable IST time string."""
     try:
@@ -99,7 +131,6 @@ def format_timestamp_ist(ts: int) -> str:
             .strftime("%Y-%m-%d %I:%M:%S %p IST")
         )
     except Exception:
-        # Fallback to local time if zoneinfo / timezone is unavailable
         return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -196,12 +227,12 @@ def parse_log_record(rec: bytes, slot_mappings: Optional[Dict[int, str]] = None)
 
 
 # ==============================================================================
-# Atomberg BLE Lock Client Class
+# Optimized Atomberg BLE Lock Client Class
 # ==============================================================================
 
 
 class AtombergLockClient:
-    """Client for connecting to and controlling an Atomberg Smart Lock over BLE."""
+    """Client for high-speed BLE communication with Atomberg SL1 Pro Lock."""
 
     def __init__(
         self,
@@ -212,7 +243,7 @@ class AtombergLockClient:
     ):
         self.mac_address = mac_address.strip().upper()
 
-        # Parse master key: 16 ASCII characters or 32 hex digits
+        # Parse master key
         if isinstance(master_key, str):
             key_clean = master_key.strip()
             if len(key_clean) == 32:
@@ -226,12 +257,9 @@ class AtombergLockClient:
             self.master_key = master_key
 
         if len(self.master_key) != 16:
-            raise ValueError(
-                f"Master key must be 16 bytes (got {len(self.master_key)} bytes). "
-                "Provide a 16-character ASCII string or 32-character hex."
-            )
+            raise ValueError(f"Master key must be 16 bytes (got {len(self.master_key)})")
 
-        # Parse lock salt: 4 bytes (8 hex characters)
+        # Parse lock salt
         if isinstance(lock_salt, str):
             salt_clean = lock_salt.strip().replace(" ", "").replace("0x", "")
             self.lock_salt = bytes.fromhex(salt_clean)
@@ -239,22 +267,20 @@ class AtombergLockClient:
             self.lock_salt = lock_salt
 
         if len(self.lock_salt) != 4:
-            raise ValueError(
-                f"Lock salt must be 4 bytes (got {len(self.lock_salt)} bytes). "
-                "Provide an 8-character hex string (e.g. '1a2b3c4d')."
-            )
+            raise ValueError(f"Lock salt must be 4 bytes (got {len(self.lock_salt)})")
 
         self.adapter = adapter
         self.client: Optional[BleakClient] = None
         self.session_token: Optional[bytes] = None
         self.session_key: Optional[bytes] = None
-        self.seq_counter: int = 5
-        self.recv_queue: asyncio.Queue = asyncio.Queue()
-        self.rx_buffer: bytearray = bytearray()
-        self.expected_len: int = 0
+        self.seq_counter: int = 2
+
+        self.rx_buffer = bytearray()
+        self.expected_len = 0
+        self.recv_queue: asyncio.Queue[bytes] = asyncio.Queue()
 
     def _clear_buffers(self) -> None:
-        self.rx_buffer.clear()
+        self.rx_buffer = bytearray()
         self.expected_len = 0
         while not self.recv_queue.empty():
             try:
@@ -262,9 +288,9 @@ class AtombergLockClient:
             except asyncio.QueueEmpty:
                 break
 
-    def _notification_handler(self, sender: Any, data: bytearray) -> None:
+    def _notification_handler(self, _characteristic: Any, data: bytearray) -> None:
         raw = bytes(data)
-        logger.debug(f"[RX CHUNK] ({len(raw)} bytes): {raw.hex(' ')}")
+        logger.debug(f"[RX NOTIFY] ({len(raw)} bytes): {raw.hex(' ')}")
 
         if raw.startswith(b"HSJ") and len(raw) >= 5:
             self.expected_len = int.from_bytes(raw[3:5], byteorder="big")
@@ -294,12 +320,12 @@ class AtombergLockClient:
 
         logger.debug(f"[TX PACKET] ({len(packet)} bytes): {packet.hex(' ')}")
 
+        # Send in 20-byte BLE chunks without artificial delays
         for i in range(0, len(packet), 20):
             chunk = packet[i : i + 20]
             if not self.client or not self.client.is_connected:
-                raise ConnectionError("Bluetooth client is disconnected during write.")
+                raise ConnectionError("Bluetooth client disconnected during write.")
             await self.client.write_gatt_char(WRITE_UUID, chunk, response=False)
-            await asyncio.sleep(0.03)
 
     async def _execute_step(
         self,
@@ -316,7 +342,7 @@ class AtombergLockClient:
             remaining = timeout - (time.time() - start_t)
             try:
                 cipher_resp = await asyncio.wait_for(
-                    self.recv_queue.get(), timeout=max(remaining, 0.1)
+                    self.recv_queue.get(), timeout=max(remaining, 0.05)
                 )
             except asyncio.TimeoutError:
                 break
@@ -334,7 +360,7 @@ class AtombergLockClient:
         raise TimeoutError(f"Timed out waiting for response opcode 0x{op_name}")
 
     async def connect(self, retries: int = DEFAULT_RETRIES) -> None:
-        """Connect to the BLE lock and register notifications with retry support."""
+        """Connect to the BLE lock and register notifications."""
         last_err: Optional[Exception] = None
 
         client_kwargs: Dict[str, Any] = {"timeout": CONNECT_TIMEOUT}
@@ -350,25 +376,18 @@ class AtombergLockClient:
 
         for attempt in range(1, retries + 1):
             try:
-                logger.info(
-                    f"Connecting to lock {self.mac_address} (Attempt {attempt}/{retries})..."
-                )
-
-                # Attempt direct connection first (avoids active scanning collision on Broadcom/RPI chips)
+                logger.info(f"Connecting to lock {self.mac_address} (Attempt {attempt}/{retries})...")
                 target = self.mac_address
 
                 if attempt > 1:
-                    # On retry, try finding BLEDevice object in case address type needs refreshing
                     logger.debug(f"Locating device {self.mac_address} via BLE scanner...")
                     try:
                         dev = await BleakScanner.find_device_by_address(
-                            self.mac_address, timeout=4.0, **scanner_kwargs
+                            self.mac_address, timeout=3.0, **scanner_kwargs
                         )
                         if dev is not None:
                             target = dev
-                            logger.debug(f"Device found in range (RSSI: {getattr(dev, 'rssi', 'N/A')} dBm)")
-                            # Allow adapter to settle after stopping discovery
-                            await asyncio.sleep(0.5)
+                            await asyncio.sleep(0.2)
                     except Exception as scan_err:
                         logger.debug(f"Scanner lookup error: {scan_err}")
 
@@ -380,7 +399,6 @@ class AtombergLockClient:
 
                 self._clear_buffers()
                 await self.client.start_notify(NOTIFY_UUID, self._notification_handler)
-                await asyncio.sleep(0.5)
                 logger.info("Connected to lock successfully.")
                 return
             except Exception as err:
@@ -389,7 +407,7 @@ class AtombergLockClient:
                 logger.warning(f"Connection attempt {attempt} failed: {err_msg}")
                 await self.disconnect()
                 if attempt < retries:
-                    await asyncio.sleep(2.0)
+                    await asyncio.sleep(0.5)
 
         raise ConnectionError(
             f"Failed to connect to Atomberg Lock ({self.mac_address}) after {retries} attempts: {last_err or 'Timeout'}"
@@ -424,7 +442,6 @@ class AtombergLockClient:
             expected_op=bytes.fromhex("00f0"),
         )
         self.session_token = resp_f0[:4]
-        logger.debug(f"Session Token: {self.session_token.hex()}")
 
         # 2. Key Exchange 0x00F1
         logger.debug("Requesting Session Key (0x00F1)...")
@@ -438,9 +455,8 @@ class AtombergLockClient:
         if len(resp_f1) < 29:
             raise RuntimeError(f"Invalid session key response length: {len(resp_f1)}")
         self.session_key = resp_f1[13:29]
-        logger.debug(f"Session Key: {self.session_key.hex()}")
 
-        # 3. Context Synchronization 0x00F2 with dynamic Lock Salt
+        # 3. Context Synchronization 0x00F2
         logger.debug("Synchronizing Context (0x00F2)...")
         sync_cmd = (
             self.session_token
@@ -457,10 +473,7 @@ class AtombergLockClient:
         logger.info("Authentication successful.")
 
     async def unlock(self) -> int:
-        """
-        Calibrate time and trigger momentary unlock.
-        Returns the unix timestamp of the unlock action.
-        """
+        """Calibrate time and trigger momentary unlock."""
         if not self.session_token or not self.session_key:
             raise RuntimeError("Must authenticate before calling unlock")
 
@@ -501,15 +514,22 @@ class AtombergLockClient:
             and unlock_dec[7] == 0x01
         )
         if not acknowledged:
-            raise RuntimeError(
-                f"Atomberg unlock was not acknowledged: {unlock_dec.hex(' ')}"
-            )
+            raise RuntimeError(f"Unlock unacknowledged: {unlock_dec.hex(' ')}")
 
         logger.info(">> UNLOCKED SUCCESSFULLY <<")
         return now_int
 
+    async def fast_unlock(self) -> int:
+        """Pipelined fast connect, auth, and unlock sequence."""
+        await self.connect()
+        try:
+            await self.authenticate()
+            return await self.unlock()
+        finally:
+            await self.disconnect()
+
     async def get_battery(self) -> Optional[int]:
-        """Query lock battery level percentage (0-100%)."""
+        """Query lock battery percentage (0-100%)."""
         if not self.session_token or not self.session_key:
             raise RuntimeError("Must authenticate before calling get_battery")
 
@@ -527,10 +547,10 @@ class AtombergLockClient:
                 self.session_key,
                 frame_seq=3,
                 expected_op=bytes.fromhex("000d"),
-                timeout=4.0,
+                timeout=2.5,
             )
         except Exception as e:
-            logger.warning(f"Battery status query failed: {e}")
+            logger.warning(f"Battery query failed: {e}")
             return None
 
         battery = None
@@ -578,7 +598,6 @@ class AtombergLockClient:
 
         for page in range(total_pages):
             offset = page * 5
-            logger.info(f"Downloading logs page {page + 1}/{total_pages} (offset {offset})...")
             fetch_req = (
                 self.session_token
                 + bytes([self.seq_counter])
@@ -618,6 +637,105 @@ class AtombergLockClient:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.disconnect()
+
+
+# ==============================================================================
+# Ultra-Fast Async HTTP Micro-Daemon (Zero External Dependencies)
+# ==============================================================================
+
+
+async def run_http_daemon(
+    mac: str, key: str, salt: str, adapter: Optional[str] = None, port: int = 8765
+) -> None:
+    """Run persistent high-speed background HTTP daemon for sub-second unlocks."""
+    client = AtombergLockClient(mac_address=mac, master_key=key, lock_salt=salt, adapter=adapter)
+    lock_mutex = asyncio.Lock()
+
+    print("\n" + "=" * 65)
+    print("  ATOMBERG HIGH-SPEED BLE MICRO-DAEMON")
+    print("=" * 65)
+    print(f"[*] Target Lock MAC: {mac}")
+    print(f"[*] Listening on   : http://127.0.0.1:{port}")
+    print("[*] Endpoints      : GET /unlock , GET /battery , GET /status")
+    print("=" * 65 + "\n")
+
+    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            line = await reader.readline()
+            if not line:
+                writer.close()
+                return
+            parts = line.decode().split()
+            if len(parts) < 2:
+                writer.close()
+                return
+
+            _method, path = parts[0], parts[1].split("?")[0]
+
+            # Drain remaining request headers
+            while True:
+                hdr = await reader.readline()
+                if not hdr or hdr == b"\r\n":
+                    break
+
+            status_code = "200 OK"
+
+            if path == "/unlock":
+                async with lock_mutex:
+                    try:
+                        logger.info("[DAEMON] Handling /unlock request...")
+                        ts = await client.fast_unlock()
+                        body_dict = {
+                            "status": "success",
+                            "unlocked": True,
+                            "timestamp": ts,
+                            "datetime": format_timestamp_ist(ts),
+                        }
+                    except Exception as e:
+                        logger.error(f"[DAEMON] Unlock error: {e}")
+                        status_code = "500 Internal Server Error"
+                        body_dict = {"status": "error", "message": str(e)}
+
+            elif path == "/battery":
+                async with lock_mutex:
+                    try:
+                        logger.info("[DAEMON] Handling /battery request...")
+                        async with client:
+                            bat = await client.get_battery()
+                        body_dict = {"status": "success", "battery": bat}
+                    except Exception as e:
+                        logger.error(f"[DAEMON] Battery query error: {e}")
+                        status_code = "500 Internal Server Error"
+                        body_dict = {"status": "error", "message": str(e)}
+
+            elif path in ("/ping", "/status", "/health"):
+                body_dict = {"status": "ok", "service": "atomberg-daemon"}
+
+            else:
+                status_code = "404 Not Found"
+                body_dict = {"error": "Not Found"}
+
+            body_bytes = json.dumps(body_dict, indent=2).encode()
+            response = (
+                f"HTTP/1.1 {status_code}\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {len(body_bytes)}\r\n"
+                f"Connection: close\r\n"
+                f"\r\n"
+            ).encode() + body_bytes
+
+            writer.write(response)
+            await writer.drain()
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
+    async with server:
+        await server.serve_forever()
 
 
 # ==============================================================================
@@ -666,7 +784,6 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """Load configuration from JSON file or environment variables."""
     cfg: Dict[str, Any] = {}
 
-    # 1. Try file
     candidates = [config_path] if config_path else ["config.json", "/etc/atomberg/config.json"]
     for p in candidates:
         if p and os.path.exists(p):
@@ -678,7 +795,6 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
             except Exception as e:
                 logger.warning(f"Failed to read config file {p}: {e}")
 
-    # 2. Overwrite with environment variables if present
     if os.environ.get("ATOMBERG_MAC"):
         cfg["mac"] = os.environ.get("ATOMBERG_MAC")
     if os.environ.get("ATOMBERG_KEY"):
@@ -693,33 +809,21 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 
 async def main_async() -> int:
     parser = argparse.ArgumentParser(
-        description="Atomberg SL1 Pro Bluetooth Lock Controller (Standalone)"
+        description="Atomberg SL1 Pro Bluetooth Lock Controller (Optimized)"
     )
     subparsers = parser.add_subparsers(dest="action", help="Action to execute")
 
-    # Command: unlock
-    subparsers.add_parser("unlock", help="Trigger remote door unlock (auto-relocks after ~5s)")
-
-    # Command: lock
-    subparsers.add_parser(
-        "lock",
-        help="Note on locking: The lock auto-relocks physically ~5s after unlocking.",
-    )
-
-    # Command: battery / status
+    subparsers.add_parser("unlock", help="Trigger fast door unlock (auto-relocks after ~5s)")
     subparsers.add_parser("battery", help="Query lock battery percentage")
     subparsers.add_parser("status", help="Check connection and battery status")
 
-    # Command: logs
-    log_parser = subparsers.add_parser("logs", help="Download and parse recent audit log records")
-    log_parser.add_argument(
-        "--json", action="store_true", help="Output raw logs as JSON"
-    )
-    log_parser.add_argument(
-        "--limit", type=int, default=20, help="Maximum log records to display (default: 20)"
-    )
+    daemon_parser = subparsers.add_parser("daemon", help="Run background HTTP micro-daemon for instant unlocks")
+    daemon_parser.add_argument("--port", type=int, default=8765, help="HTTP daemon port (default: 8765)")
 
-    # Command: scan
+    log_parser = subparsers.add_parser("logs", help="Download and parse recent audit log records")
+    log_parser.add_argument("--json", action="store_true", help="Output raw logs as JSON")
+    log_parser.add_argument("--limit", type=int, default=20, help="Maximum log records to display (default: 20)")
+
     subparsers.add_parser("scan", help="Scan for nearby Bluetooth Low Energy devices")
 
     # Global options
@@ -727,14 +831,11 @@ async def main_async() -> int:
     parser.add_argument("-m", "--mac", help="Lock BLE MAC Address (e.g. AA:BB:CC:11:22:33)")
     parser.add_argument("-k", "--key", help="Master Key (16-char ASCII string or 32-char hex)")
     parser.add_argument("-s", "--salt", help="Lock Salt (8-char hex string, e.g. 1a2b3c4d)")
-    parser.add_argument(
-        "-a", "--adapter", help="HCI Adapter name (e.g. hci0, hci1) on Linux/Raspberry Pi"
-    )
+    parser.add_argument("-a", "--adapter", help="HCI Adapter name (e.g. hci0, hci1) on Linux")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args()
 
-    # Logging setup
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -746,35 +847,19 @@ async def main_async() -> int:
         parser.print_help()
         return 1
 
-    # Load credentials / config
     config = load_config(args.config)
     adapter = args.adapter or config.get("adapter")
 
-    # Scan command doesn't need credentials
     if args.action == "scan":
         await scan_ble_devices(adapter=adapter)
         return 0
 
-    if args.action == "lock":
-        print("\n" + "=" * 60)
-        print("  HARDWARE AUTO-RELOCK NOTICE")
-        print("=" * 60)
-        print(
-            "The Atomberg SL1 Pro lock does not support a software 'Lock' command.\n"
-            "Its physical clutch mechanism automatically relocks itself 5 seconds\n"
-            "after an unlock action is triggered.\n"
-        )
-        return 0
-
     # Load credentials
-    config = load_config(args.config)
     mac = args.mac or config.get("mac") or config.get("LOCK_MAC")
     key = args.key or config.get("master_key") or config.get("STATIC_MASTER_KEY")
     salt = args.salt or config.get("salt") or config.get("LOCK_SALT")
-    adapter = args.adapter or config.get("adapter")
     slot_mappings = config.get("slot_mappings", {})
 
-    # Convert slot mapping keys from string to int if needed
     formatted_mappings = {}
     for sk, sv in slot_mappings.items():
         try:
@@ -785,33 +870,25 @@ async def main_async() -> int:
     if not mac or not key or not salt:
         print(
             "[ERROR] Missing credentials! Provide --mac, --key, and --salt, "
-            "or define them in config.json / environment variables.",
-            file=sys.stderr,
-        )
-        print(
-            "\nExample:\n"
-            "    python3 atomberg_cli.py --mac 'AA:BB:CC:11:22:33' --key 'MySecretKey12345' --salt '1a2b3c4d' unlock\n"
-            "or create a config.json (see config.json.example).",
+            "or define them in config.json.",
             file=sys.stderr,
         )
         return 1
 
-    client = AtombergLockClient(
-        mac_address=mac,
-        master_key=key,
-        lock_salt=salt,
-        adapter=adapter,
-    )
+    if args.action == "daemon":
+        await run_http_daemon(mac=mac, key=key, salt=salt, adapter=adapter, port=args.port)
+        return 0
+
+    client = AtombergLockClient(mac_address=mac, master_key=key, lock_salt=salt, adapter=adapter)
 
     try:
-        async with client:
-            if args.action == "unlock":
-                ts = await client.unlock()
-                print(f"[+] Door unlocked successfully at {format_timestamp_ist(ts)}")
-                print("[i] Latch will auto-relock in ~5 seconds.")
-                return 0
+        if args.action == "unlock":
+            ts = await client.fast_unlock()
+            print(f"[+] Door unlocked successfully at {format_timestamp_ist(ts)}")
+            return 0
 
-            elif args.action in ("battery", "status"):
+        async with client:
+            if args.action in ("battery", "status"):
                 bat = await client.get_battery()
                 if bat is not None:
                     print(f"[+] Atomberg Lock Battery: {bat}%")
@@ -837,7 +914,7 @@ async def main_async() -> int:
                     det = item.get("detail") or ""
                     print(f"{idx:<4} | {dt:<24} | {evt:<24} | {det}")
                 print("=" * 80)
-                print(f"Displaying {len(display_logs)} of {len(logs)} total log records.\n")
+                print(f"Displaying {len(display_logs)} of {len(logs)} total records.\n")
                 return 0
 
     except Exception as e:

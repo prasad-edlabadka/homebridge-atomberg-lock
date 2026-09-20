@@ -1,0 +1,19 @@
+[Unit]
+Description=Atomberg SL1 Pro Smart Lock BLE Micro-Daemon
+After=bluetooth.target network.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+User=homebridge
+WorkingDirectory=/home/homebridge
+ExecStart=/home/homebridge/venv/bin/python3 /home/homebridge/homebridge-atomberg-lock/atomberg_cli.py daemon --port 8765
+Restart=always
+RestartSec=5
+
+# Sandboxing & Permissions
+SupplementaryGroups=bluetooth
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

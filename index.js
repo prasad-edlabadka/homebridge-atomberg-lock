@@ -1,4 +1,5 @@
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
+const http = require('http');
 const path = require('path');
 const fs = require('fs');
 
@@ -37,6 +38,7 @@ class AtombergLockAccessory {
     this.salt = this.config.salt || this.config.LOCK_SALT || '';
     this.configPath = this.config.configPath || (fs.existsSync('/home/homebridge/config.json') ? '/home/homebridge/config.json' : '');
     this.adapter = this.config.adapter || '';
+    this.daemonPort = this.config.daemonPort || 8765;
     this.autoLockDelay = this.config.autoLockDelay !== undefined ? Number(this.config.autoLockDelay) : 5;
     this.enableBattery = this.config.enableBattery !== undefined ? Boolean(this.config.enableBattery) : true;
 
@@ -45,19 +47,34 @@ class AtombergLockAccessory {
     this.targetState = this.Characteristic.LockTargetState.SECURED;
     this.isUnlocking = false;
 
+    // Daemon Process Management
+    this.daemonProcess = null;
+    this.isShuttingDown = false;
+
     // Battery State
     this.batteryLevel = 100;
     this.statusLowBattery = this.Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL;
 
-    this.log.info(`[${this.name}] Initializing with script: ${this.scriptPath}`);
-    this.log.info(`[${this.name}] Using Python path: ${this.pythonPath}`);
+    this.log.info(`[${this.name}] Initialized using script: ${this.scriptPath}`);
+    this.log.info(`[${this.name}] Python interpreter: ${this.pythonPath}`);
+
+    // Automatically spawn and supervise background micro-daemon
+    this.startDaemon();
+
+    // Register clean shutdown
+    if (this.api && this.api.on) {
+      this.api.on('shutdown', () => {
+        this.isShuttingDown = true;
+        this.stopDaemon();
+      });
+    }
 
     // 1. Accessory Information Service
     this.infoService = new this.Service.AccessoryInformation()
       .setCharacteristic(this.Characteristic.Manufacturer, 'Atomberg')
       .setCharacteristic(this.Characteristic.Model, 'SL1 Pro')
       .setCharacteristic(this.Characteristic.SerialNumber, this.mac || 'SL1-PRO')
-      .setCharacteristic(this.Characteristic.FirmwareRevision, '1.0.1');
+      .setCharacteristic(this.Characteristic.FirmwareRevision, '1.1.0');
 
     // 2. Lock Mechanism Service
     this.lockService = new this.Service.LockMechanism(this.name);
@@ -104,6 +121,69 @@ class AtombergLockAccessory {
     }
   }
 
+  startDaemon() {
+    if (this.daemonProcess || this.isShuttingDown) {
+      return;
+    }
+
+    const args = [this.scriptPath];
+
+    if (this.mac) {
+      args.push('-m', this.mac);
+    }
+    if (this.masterKey) {
+      args.push('-k', this.masterKey);
+    }
+    if (this.salt) {
+      args.push('-s', this.salt);
+    }
+    if (!this.mac && this.configPath) {
+      args.push('-c', this.configPath);
+    }
+    if (this.adapter) {
+      args.push('-a', this.adapter);
+    }
+
+    args.push('daemon', '--port', String(this.daemonPort));
+
+    this.log.info(`[${this.name}] Starting auto background micro-daemon (port ${this.daemonPort})...`);
+
+    try {
+      this.daemonProcess = spawn(this.pythonPath, args, {
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      this.daemonProcess.stdout.on('data', (data) => {
+        this.log.debug(`[Daemon stdout] ${data.toString().trim()}`);
+      });
+
+      this.daemonProcess.stderr.on('data', (data) => {
+        this.log.debug(`[Daemon stderr] ${data.toString().trim()}`);
+      });
+
+      this.daemonProcess.on('exit', (code, signal) => {
+        if (!this.isShuttingDown) {
+          this.log.warn(`[${this.name}] Background daemon stopped (code: ${code}). Restarting in 5s...`);
+          this.daemonProcess = null;
+          setTimeout(() => this.startDaemon(), 5000);
+        }
+      });
+    } catch (err) {
+      this.log.error(`[${this.name}] Failed to auto-start daemon: ${err.message}`);
+      this.daemonProcess = null;
+    }
+  }
+
+  stopDaemon() {
+    if (this.daemonProcess) {
+      try {
+        this.log.info(`[${this.name}] Terminating background daemon...`);
+        this.daemonProcess.kill('SIGTERM');
+      } catch (_) {}
+      this.daemonProcess = null;
+    }
+  }
+
   getServices() {
     const services = [this.infoService, this.lockService];
     if (this.batteryService) {
@@ -140,13 +220,14 @@ class AtombergLockAccessory {
     this.targetState = this.Characteristic.LockTargetState.UNSECURED;
     this.lockService.updateCharacteristic(this.Characteristic.LockTargetState, this.targetState);
 
-    // Asynchronously execute BLE unlock so HomeKit UI receives instant feedback
+    // Asynchronously execute BLE unlock
     (async () => {
+      const startTime = Date.now();
       try {
-        this.log.info(`[${this.name}] Initiating BLE unlock sequence...`);
-        const stdout = await this.executeCliCommand('unlock');
-        this.log.info(`[${this.name}] Output: ${stdout.trim().replace(/\n/g, ' ')}`);
-        this.log.info(`[${this.name}] Door unlocked successfully!`);
+        this.log.info(`[${this.name}] Initiating fast unlock...`);
+        const result = await this.executeAction('unlock');
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+        this.log.info(`[${this.name}] Door UNLOCKED in ${elapsed}s! Output: ${result.replace(/\n/g, ' ')}`);
 
         // Set state to Unlocked
         this.currentState = this.Characteristic.LockCurrentState.UNSECURED;
@@ -173,11 +254,40 @@ class AtombergLockAccessory {
     })();
   }
 
-  executeCliCommand(action) {
+  executeAction(action) {
+    return new Promise((resolve, reject) => {
+      // 1. Attempt ultra-fast background daemon first (sub-second unlock)
+      const req = http.get(`http://127.0.0.1:${this.daemonPort}/${action}`, { timeout: 10000 }, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            return resolve(body);
+          }
+          try {
+            const errObj = JSON.parse(body);
+            if (errObj.message) return reject(new Error(errObj.message));
+          } catch (_) {}
+          reject(new Error(`Daemon returned HTTP ${res.statusCode}: ${body}`));
+        });
+      });
+
+      req.on('error', () => {
+        // Daemon not ready/listening -> Fallback to optimized CLI execution
+        this.executeCli(action).then(resolve).catch(reject);
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        this.executeCli(action).then(resolve).catch(reject);
+      });
+    });
+  }
+
+  executeCli(action) {
     return new Promise((resolve, reject) => {
       const args = [this.scriptPath];
 
-      // Prefer explicit credentials if configured
       if (this.mac) {
         args.push('-m', this.mac);
       }
@@ -188,7 +298,6 @@ class AtombergLockAccessory {
         args.push('-s', this.salt);
       }
 
-      // Fallback to config path
       if (!this.mac && this.configPath) {
         args.push('-c', this.configPath);
       }
@@ -199,16 +308,14 @@ class AtombergLockAccessory {
 
       args.push(action);
 
-      this.log.info(`[${this.name}] Executing: ${this.pythonPath} ${args.join(' ')}`);
-
-      execFile(this.pythonPath, args, { timeout: 30000 }, (error, stdout, stderr) => {
+      execFile(this.pythonPath, args, { timeout: 20000 }, (error, stdout, stderr) => {
         if (error) {
           return reject(new Error(stderr || stdout || error.message));
         }
         if (stdout && stdout.toLowerCase().includes('failed to connect')) {
           return reject(new Error(stdout.trim()));
         }
-        resolve(stdout);
+        resolve(stdout.trim());
       });
     });
   }
@@ -224,10 +331,10 @@ class AtombergLockAccessory {
   updateBattery() {
     if (!this.enableBattery) return;
 
-    this.executeCliCommand('battery')
+    this.executeAction('battery')
       .then((stdout) => {
         if (!stdout) return;
-        const match = stdout.match(/Battery:\s*(\d+)%/i) || stdout.match(/(\d+)%/);
+        const match = stdout.match(/Battery:\s*(\d+)%/i) || stdout.match(/"battery":\s*(\d+)/i) || stdout.match(/(\d+)%/);
         if (match && match[1]) {
           const level = parseInt(match[1], 10);
           if (!isNaN(level) && level >= 0 && level <= 100) {

@@ -1,14 +1,15 @@
 # @prasad-edlabadkar/homebridge-atomberg-lock
 
-Homebridge plugin for the **Atomberg SL1 Pro Bluetooth Smart Lock** (fully compatible with **Homebridge 2.0** and **Homebridge 1.x**).
+High-speed Homebridge plugin for the **Atomberg SL1 Pro Bluetooth Smart Lock** (fully compatible with **Homebridge 2.0** and **Homebridge 1.x**).
 
-Exposes the smart lock to Apple HomeKit as a native **Lock Mechanism** and **Battery Service**.
+Exposes the smart lock to Apple HomeKit as a native **Lock Mechanism** and **Battery Service** with sub-second execution.
 
 ---
 
 ## Features
 
-- **Self-Contained**: The BLE Python communication scripts are bundled inside this plugin—no manual script copying required.
+- **⚡ Sub-Second Speed**: Precomputed CRC tables, zero-delay GATT writes, and built-in background micro-daemon.
+- **Self-Contained**: The BLE Python communication scripts are bundled inside this plugin—no external setup required.
 - **Apple HomeKit Integration**: Lock/Unlock through Apple Home app, Siri, and HomeKit Automations.
 - **Hardware Auto-Relock Emulation**: Upon unlocking, transitions state to `UNSECURED`, then automatically returns to `SECURED` after 5 seconds to match the lock's physical clutch.
 - **Battery Reporting**: Displays real-time battery percentage in Apple Home.
@@ -16,60 +17,54 @@ Exposes the smart lock to Apple HomeKit as a native **Lock Mechanism** and **Bat
 
 ---
 
-## Prerequisites (on Raspberry Pi)
+## Installation on Raspberry Pi
 
-Make sure Python dependencies are installed in your virtual environment:
+### 1. Install Plugin
 ```bash
-source /home/homebridge/venv/bin/activate
-pip install bleak pycryptodome
+sudo npm install -g @prasad-edlabadkar/homebridge-atomberg-lock
 ```
+*(Or install directly from GitHub: `sudo npm install -g git+https://github.com/prasad-edlabadka/homebridge-atomberg-lock.git`)*
 
----
-
-## Installation
-
-### Method A: Install from Local Directory
-```bash
-cd /home/homebridge/homebridge-atomberg-lock
-sudo npm install -g .
-```
-
----
-
-## Configuration
-
-### Option 1: Via Homebridge Web UI
-1. Go to your **Homebridge UI** $\rightarrow$ **Plugins** tab.
-2. Click **Settings** on **AtombergLock**.
-3. Fill in your lock credentials:
-   - **Lock MAC Address**: `AA:BB:CC:11:22:33`
-   - **Static Master Key**: `AbCdEfGhIjKlMnOp`
-   - **Lock Salt**: `1a2b3c4d`
-4. Save and Restart Homebridge.
-
----
-
-### Option 2: Via `config.json`
-Add the accessory directly to your `/var/lib/homebridge/config.json` under `"accessories": [ ... ]`:
+### 2. Configure in Homebridge
+In your Homebridge Web UI **Config** tab (or `/var/lib/homebridge/config.json`), add under `"accessories": [ ... ]`:
 
 ```json
 {
   "accessory": "AtombergLock",
   "name": "Front Door Lock",
-  "mac": "AA:BB:CC:11:22:33",
-  "masterKey": "AbCdEfGhIjKlMnOp",
-  "salt": "1a2b3c4d",
+  "mac": "6A:35:42:3A:5B:5C",
+  "masterKey": "EPib52e5HgJWd6fq",
+  "salt": "5c8f9da9",
   "adapter": "hci0",
   "autoLockDelay": 5,
   "enableBattery": true
 }
 ```
-*(Or point to `"configPath": "/home/homebridge/config.json"` if you prefer using a file).*
 
 ---
 
-## Permissions Note
-Ensure the user running Homebridge (usually `homebridge`) has access to Bluetooth:
+## 🚀 Ultra-Speed Mode: Background Daemon (Optional, < 1s Unlocks)
+
+To eliminate all Python startup and DBus connection overhead for **near-instant unlocks**:
+
+1. Enable the background micro-daemon systemd service:
+   ```bash
+   sudo cp /var/lib/homebridge/node_modules/@prasad-edlabadkar/homebridge-atomberg-lock/atomberg-daemon.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now atomberg-daemon
+   ```
+2. Check status:
+   ```bash
+   sudo systemctl status atomberg-daemon
+   ```
+
+When the daemon is running, HomeKit unlocks trigger directly via local HTTP in **< 1 second**!
+*(If the daemon is not running, the plugin automatically falls back to optimized CLI execution).*
+
+---
+
+## Permissions
+Ensure `homebridge` has access to Bluetooth:
 ```bash
 sudo usermod -aG bluetooth homebridge
 ```

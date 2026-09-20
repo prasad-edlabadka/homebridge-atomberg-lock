@@ -1,13 +1,14 @@
 {
   "name": "@prasad-edlabadkar/homebridge-atomberg-lock",
-  "version": "1.0.1",
-  "description": "Homebridge plugin for Atomberg SL1 Pro Bluetooth Smart Lock (Homebridge 2.0 and 1.x compatible)",
+  "version": "1.1.0",
+  "description": "High-speed Homebridge plugin for Atomberg SL1 Pro Bluetooth Smart Lock (Homebridge 2.0 & 1.x ready)",
   "main": "index.js",
   "files": [
     "index.js",
     "atomberg_cli.py",
     "requirements.txt",
     "config.schema.json",
+    "atomberg-daemon.service",
     "README.md"
   ],
   "keywords": [
